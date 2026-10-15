@@ -1,6 +1,6 @@
 # ============================================================
 #  Meeting Notes for Windows.  Run once in PowerShell:
-#    irm <YOUR-URL>/install-windows.ps1 | iex
+#    irm https://raw.githubusercontent.com/gapletona/Meeting-Summarizer/main/install-windows.ps1 | iex
 #  Then type  meeting  whenever a call starts.
 #  NOTE: requires the free VB-CABLE virtual audio device (guided below).
 # ============================================================

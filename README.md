@@ -52,20 +52,20 @@ For a full one-hour meeting, you're looking at transcription in under 60 seconds
 ### macOS
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Shreetej/files2/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/gapletona/Meeting-Summarizer/main/install.sh | bash
 ```
 
 ### Windows
 
 ```powershell
 Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
-curl -fsSL https://raw.githubusercontent.com/Shreetej/files2/main/install-windows.ps1 | powershell
+irm https://raw.githubusercontent.com/gapletona/Meeting-Summarizer/main/install-windows.ps1 | iex
 ```
 
 ### Linux
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Shreetej/files2/main/install-linux.sh | bash
+curl -fsSL https://raw.githubusercontent.com/gapletona/Meeting-Summarizer/main/install-linux.sh | bash
 ```
 
 #### What the installer does:
@@ -242,7 +242,7 @@ Then run `meeting` again.
 ## Project Structure
 
 ```
-files2/
+Meeting-Summarizer/
 ├── install.sh              # macOS installer
 ├── install-windows.ps1     # Windows installer
 ├── install-linux.sh        # Linux installer
