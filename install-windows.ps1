@@ -44,8 +44,9 @@ writes Markdown into --out-dir, prints ONLY that path on stdout (progress -> std
 Transcription backend is chosen automatically:
   - macOS on Apple Silicon  -> mlx-whisper (Metal GPU)
   - Windows / Linux         -> faster-whisper (NVIDIA GPU if present, else CPU)
-Summarization is identical everywhere: a local Ollama / OpenAI-compatible server."""
-import argparse, platform, shutil, subprocess, sys, tempfile, time
+Summarization is identical everywhere: a local Ollama / OpenAI-compatible server.
+Existing transcripts (--transcript) can be .txt/.md, .vtt (Teams/Zoom) or .docx (Teams)."""
+import argparse, html, json, platform, re, shutil, subprocess, sys, tempfile, time, urllib.request, zipfile
 from pathlib import Path
 
 
@@ -188,17 +189,184 @@ Anything left unresolved.
 Be faithful to the transcript. Do NOT invent names, numbers, dates, or commitments. Keep it tight."""
 
 
-def summarize(transcript, llm, base_url, api_key):
-    from openai import OpenAI
-    log("Summarizing with the local model...")
-    client = OpenAI(base_url=base_url, api_key=api_key)
+PART_PROMPT = """You are an expert meeting-notes assistant. You are given ONE PART of a longer \
+meeting transcript. Extract, as terse Markdown bullets under these headings, only what this part contains:
+
+### Key Points
+### Decisions
+### Action Items
+(each line: - [ ] <task> - <owner if mentioned, else 'unassigned'> (<due date if mentioned>))
+### Open Questions
+
+Keep speaker names exactly as written. Do NOT invent anything. Omit a heading if it has nothing."""
+
+
+# ---------- transcript files (Teams .vtt / .docx, or plain text) ----------
+
+def merge_turns(turns):
+    """[(speaker, text)] -> 'Speaker: text' lines, joining consecutive turns by the same speaker."""
+    merged = []
+    for spk, text in turns:
+        text = " ".join(text.split())
+        if not text:
+            continue
+        if merged and spk and merged[-1][0] == spk:
+            merged[-1][1] += " " + text
+        else:
+            merged.append([spk, text])
+    return "\n".join(f"{s}: {t}" if s else t for s, t in merged)
+
+
+def parse_vtt(raw):
+    """WebVTT -> speaker turns. Drops the header, cue ids and timestamps; keeps <v Name> speakers."""
+    turns = []
+    for block in re.split(r"\n\s*\n", raw.replace("\r", "")):
+        lines = block.strip().split("\n")
+        ts = next((i for i, l in enumerate(lines) if "-->" in l), None)
+        if ts is None:            # WEBVTT header, NOTE / STYLE blocks
+            continue
+        for line in lines[ts + 1:]:
+            m = re.match(r"\s*<v\s+([^>]+)>(.*)", line)
+            spk, text = (m.group(1).strip(), m.group(2)) if m else (None, line)
+            text = html.unescape(re.sub(r"<[^>]+>", "", text)).strip()
+            if spk is None:
+                if turns and not re.match(r"^[^:]{1,40}:\s", text):
+                    spk = turns[-1][0]                          # continuation of the same cue
+                else:
+                    m2 = re.match(r"^([^:]{1,40}):\s+(.*)", text)  # Zoom style "Name: text"
+                    spk, text = (m2.group(1).strip(), m2.group(2)) if m2 else (None, text)
+            turns.append((spk, text))
+    return merge_turns(turns)
+
+
+def parse_docx(path):
+    """Teams .docx transcript -> speaker turns. Standard library only (no python-docx)."""
+    with zipfile.ZipFile(path) as z:
+        xml = z.read("word/document.xml").decode("utf-8", errors="replace")
+    paras = []
+    for p in re.findall(r"<w:p[ >].*?</w:p>", xml, flags=re.S):
+        p = re.sub(r"<w:(tab|br)\b[^>]*/>", " ", p)
+        text = "".join(re.findall(r"<w:t[^>]*>([^<]*)</w:t>", p))
+        text = html.unescape(text).strip()
+        if text:
+            paras.append(text)
+    # Teams writes a "Name   0:03" (or "Name 1:02:03") line before each turn.
+    header = re.compile(r"^(.{1,60}?)\s+(?:\d{1,2}:)?\d{1,2}:\d{2}(?:\.\d+)?$")
+    turns, spk = [], None
+    for text in paras:
+        m = header.match(text)
+        if m:
+            spk = m.group(1).strip()
+        else:
+            turns.append((spk, text))
+    return merge_turns(turns)
+
+
+def load_transcript(path):
+    """Returns (clean transcript text, label for the notes header)."""
+    ext = path.suffix.lower()
+    if ext == ".docx":
+        return parse_docx(path), "Word transcript"
+    raw = path.read_text(encoding="utf-8-sig", errors="replace")
+    if ext == ".vtt" or raw.lstrip().startswith("WEBVTT"):
+        return parse_vtt(raw), "VTT transcript"
+    return raw.strip(), "provided transcript"
+
+
+# ---------- summarization ----------
+
+def ollama_root(base_url):
+    """If base_url is an Ollama server, return its root URL (for the native API), else None."""
+    root = re.sub(r"/v1/?$", "", base_url.rstrip("/"))
+    try:
+        with urllib.request.urlopen(f"{root}/api/version", timeout=3) as r:
+            return root if "version" in json.load(r) else None
+    except Exception:
+        return None
+
+
+def make_chat(llm, base_url, api_key, ctx):
+    """Returns chat(system, user) -> text. On Ollama it uses the native API so the context window
+    can be set per request (its OpenAI endpoint is stuck at the server default, often 4096)."""
+    root = ollama_root(base_url)
+    if root:
+        def chat(system, user):
+            body = {"model": llm, "stream": False,
+                    "options": {"num_ctx": ctx, "temperature": 0.2},
+                    "messages": [{"role": "system", "content": system},
+                                 {"role": "user", "content": user}]}
+            req = urllib.request.Request(f"{root}/api/chat", json.dumps(body).encode(),
+                                         {"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=1800) as r:
+                return json.load(r)["message"]["content"]
+    else:
+        from openai import OpenAI
+        client = OpenAI(base_url=base_url, api_key=api_key)
+
+        def chat(system, user):
+            resp = client.chat.completions.create(
+                model=llm, temperature=0.2,
+                messages=[{"role": "system", "content": system}, {"role": "user", "content": user}])
+            return resp.choices[0].message.content
+    # Reasoning models (e.g. qwen3:4b) may prefix their answer with a <think> block.
+    return lambda system, user: re.sub(r"<think>.*?</think>", "", chat(system, user), flags=re.S).strip()
+
+
+def split_text(text, max_chars):
+    """Split on line (speaker-turn) boundaries into pieces of at most max_chars."""
+    pieces, cur = [], ""
+    for line in text.split("\n"):
+        while len(line) > max_chars:                   # one enormous line: cut at a space
+            cut = line.rfind(" ", 0, max_chars)
+            cut = cut if cut > 0 else max_chars
+            if cur:
+                pieces.append(cur)
+                cur = ""
+            pieces.append(line[:cut])
+            line = line[cut:].lstrip()
+        if cur and len(cur) + len(line) + 1 > max_chars:
+            pieces.append(cur)
+            cur = line
+        else:
+            cur = f"{cur}\n{line}" if cur else line
+    if cur.strip():
+        pieces.append(cur)
+    return pieces
+
+
+def summarize(transcript, llm, base_url, api_key, ctx=16384):
     t0 = time.perf_counter()
-    resp = client.chat.completions.create(
-        model=llm, temperature=0.2,
-        messages=[{"role": "system", "content": SYSTEM_PROMPT},
-                  {"role": "user", "content": f"Here is the meeting transcript:\n\n{transcript}"}],
-    )
-    return resp.choices[0].message.content.strip(), time.perf_counter() - t0
+    chat = make_chat(llm, base_url, api_key, ctx)
+    # Room for the transcript = context minus prompt overhead and ~2k tokens of reply.
+    # ~3.5 characters per token is a safe estimate for English.
+    max_chars = max(4000, int((ctx - 3000) * 3.5))
+    if len(transcript) <= max_chars:
+        log("Summarizing with the local model...")
+        notes = chat(SYSTEM_PROMPT, f"Here is the meeting transcript:\n\n{transcript}")
+        return notes, time.perf_counter() - t0
+
+    # Too long for one pass: notes per part, then (if needed, repeatedly) condense, then final notes.
+    parts = split_text(transcript, max_chars)
+    log(f"Long transcript - summarizing in {len(parts)} parts...")
+    partials = []
+    for i, part in enumerate(parts, 1):
+        log(f"  part {i}/{len(parts)}...")
+        partials.append(chat(PART_PROMPT, f"Transcript part {i} of {len(parts)}:\n\n{part}"))
+    combined = "\n\n".join(f"## Part {i}\n{n}" for i, n in enumerate(partials, 1))
+    for _ in range(3):                                 # bounded, in case notes don't shrink
+        if len(combined) <= max_chars:
+            break
+        groups = split_text(combined, max_chars)
+        log(f"  condensing {len(groups)} groups of part-notes...")
+        combined = "\n\n".join(chat(PART_PROMPT, f"Notes from consecutive parts of one meeting:\n\n{g}")
+                               for g in groups)
+    log("  writing the final notes...")
+    notes = chat(SYSTEM_PROMPT, "These are notes taken from consecutive parts of ONE meeting, in order. "
+                                "Merge them into the final notes, removing duplicates. Where a later part "
+                                "changes an earlier decision, keep only the later one. Use exactly the "
+                                "sections and the '- [ ]' checklist format specified."
+                                f"\n\n{combined}")
+    return notes, time.perf_counter() - t0
 
 
 def main():
@@ -214,16 +382,19 @@ def main():
     p.add_argument("--llm", default="qwen3:4b")
     p.add_argument("--base-url", default="http://localhost:11434/v1")
     p.add_argument("--api-key", default="not-needed")
+    p.add_argument("--ctx", type=int, default=16384,
+                   help="LLM context window in tokens; longer transcripts are summarized in parts")
     args = p.parse_args()
 
     if args.transcript:
         tpath = Path(args.transcript).expanduser()
         if not tpath.exists():
             log(f"Transcript not found: {tpath}"); sys.exit(1)
-        transcript = tpath.read_text(encoding="utf-8", errors="replace").strip()
+        transcript, backend = load_transcript(tpath)
         if not transcript:
             transcript = "(Empty transcript file.)"
-        backend, t_tx = "provided transcript", 0.0
+        t_tx = 0.0
+        log(f"Loaded {backend}: {len(transcript.split()):,} words")
     elif args.audio:
         audio = Path(args.audio).expanduser()
         if not audio.exists():
@@ -235,7 +406,7 @@ def main():
     else:
         log("Provide either an audio file or --transcript <file>"); sys.exit(1)
 
-    notes, t_sum = summarize(transcript, args.llm, args.base_url, args.api_key)
+    notes, t_sum = summarize(transcript, args.llm, args.base_url, args.api_key, args.ctx)
 
     out_dir = Path(args.out_dir).expanduser(); out_dir.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y-%m-%d_%H-%M")
@@ -269,6 +440,9 @@ $MicDevice = Read-Host "Paste your MICROPHONE device name (from the list above)"
 `$Llm = "qwen3:4b-instruct"
 `$BaseUrl = "http://localhost:11434/v1"
 `$ApiKey = "not-needed"
+# LLM context window in tokens. 16384 fits ~50 min of meeting in one pass on an 8 GB GPU;
+# longer meetings are summarized in parts automatically.
+`$Ctx = 16384
 `$SysDevice = "$SysDevice"
 `$MicDevice = "$MicDevice"
 "@ | Set-Content -Path "$Support\config.ps1" -Encoding UTF8
@@ -276,7 +450,9 @@ $MicDevice = Read-Host "Paste your MICROPHONE device name (from the list above)"
 # 7) Write the meeting command
 $meeting = @'
 # meeting.ps1 (Windows) - records system audio (via VB-CABLE) + mic, makes notes locally.
-param([string]$Model, [string]$Provider, [string]$Url, [string]$Key, [switch]$List)
+#   meeting -Transcript <file>  summarizes an existing transcript (.vtt / .docx / .txt) instead.
+param([string]$Model, [string]$Provider, [string]$Url, [string]$Key, [switch]$List,
+      [string]$Transcript, [int]$Context)
 $Support = "$env:LOCALAPPDATA\MeetingNotes"
 $OutDir  = "$env:USERPROFILE\Desktop\Meeting Notes"
 . "$Support\config.ps1"   # sets $Llm, $BaseUrl, $ApiKey, $SysDevice, $MicDevice
@@ -291,12 +467,26 @@ switch ($Provider) {
 if ($Url)   { $BaseUrl = $Url }
 if ($Key)   { $ApiKey = $Key }
 if ($Model) { $Llm = $Model }
+if ($Context) { $Ctx = $Context } elseif (-not $Ctx) { $Ctx = 16384 }   # $Ctx may come from config.ps1
 if ($List) {
   & "$Support\venv\Scripts\python.exe" -c "from openai import OpenAI; [print(' -', m.id) for m in OpenAI(base_url='$BaseUrl', api_key='$ApiKey').models.list().data]"
   exit
 }
 Write-Host "Model: $Llm  @  $BaseUrl"
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
+
+if ($Transcript) {
+  if (-not (Test-Path -LiteralPath $Transcript)) { Write-Host "Transcript file not found: $Transcript"; exit 1 }
+  $Transcript = (Resolve-Path -LiteralPath $Transcript).Path
+  Write-Host "Summarizing transcript locally..."
+  $NoteFile = & "$Support\venv\Scripts\python.exe" "$Support\notes_engine.py" --transcript "$Transcript" `
+                --out-dir "$OutDir" --llm $Llm --base-url $BaseUrl --api-key $ApiKey --ctx $Ctx
+  if (-not $NoteFile) { Write-Host "Could not generate notes - is Ollama running? Try: ollama serve"; exit 1 }
+  Write-Host "Saved to: $NoteFile"
+  Invoke-Item $OutDir
+  exit
+}
+
 $Stamp = Get-Date -Format "yyyy-MM-dd_HH-mm"
 $Audio = "$Support\rec_$Stamp.wav"
 
@@ -309,7 +499,7 @@ ffmpeg -hide_banner -loglevel error `
 
 Write-Host "Transcribing and summarizing locally..."
 $NoteFile = & "$Support\venv\Scripts\python.exe" "$Support\notes_engine.py" "$Audio" `
-              --out-dir "$OutDir" --backend faster --llm $Llm --base-url $BaseUrl --api-key $ApiKey
+              --out-dir "$OutDir" --backend faster --llm $Llm --base-url $BaseUrl --api-key $ApiKey --ctx $Ctx
 if (-not $NoteFile) { Write-Host "Could not generate notes - is Ollama running? Try: ollama serve"; exit 1 }
 Remove-Item $Audio -ErrorAction SilentlyContinue
 Write-Host "Saved to: $OutDir"

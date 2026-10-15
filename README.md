@@ -121,6 +121,18 @@ meeting --list
 meeting --help
 ```
 
+### Summarize a Teams (or Zoom) transcript — Windows
+
+Already have a transcript? Skip recording and Whisper entirely:
+
+```powershell
+meeting -Transcript "$env:USERPROFILE\Downloads\Weekly Sync.vtt"
+```
+
+- **Formats:** `.vtt` (Teams: *Recap ▸ Transcript ▸ Download ▸ .vtt*; Zoom works too), `.docx` (Teams' Word download), or plain `.txt` / `.md`.
+- **Speaker names are kept.** Timestamps and cue IDs are stripped and each person's lines are merged into `Name: text`, so action items get real owners.
+- **Long meetings are handled.** Notes are generated with a 16k-token context window (about 50 minutes of conversation in one pass); anything longer is summarized in parts and merged. Change it with `-Context 8192` (smaller GPU) or `$Ctx` in `config.ps1`.
+
 ---
 
 ## How It Works (No Magic, Just Code)
