@@ -9,7 +9,7 @@ Write-Host "Installing Meeting Notes for Windows..."
 
 $Support = "$env:LOCALAPPDATA\MeetingNotes"
 $Bin     = "$env:LOCALAPPDATA\MeetingNotes\bin"
-New-Item -ItemType Directory -Force -Path $Support, $Bin, "$env:USERPROFILE\Desktop\Meeting Notes" | Out-Null
+New-Item -ItemType Directory -Force -Path $Support, $Bin, "$([Environment]::GetFolderPath('Desktop'))\Meeting Notes" | Out-Null
 
 # 1) Dependencies via winget (built into Windows 10/11)
 Write-Host ">>> Installing ffmpeg, Python, and Ollama via winget..."
@@ -445,6 +445,8 @@ $MicDevice = Read-Host "Paste your MICROPHONE device name (from the list above)"
 `$Ctx = 16384
 `$SysDevice = "$SysDevice"
 `$MicDevice = "$MicDevice"
+# Where notes are saved. Default: "Meeting Notes" on your Desktop (follows OneDrive Desktop redirection).
+#`$OutDir = "D:\Notes\Meetings"
 "@ | Set-Content -Path "$Support\config.ps1" -Encoding UTF8
 
 # 7) Write the meeting command
@@ -454,7 +456,7 @@ $meeting = @'
 param([string]$Model, [string]$Provider, [string]$Url, [string]$Key, [switch]$List,
       [string]$Transcript, [int]$Context)
 $Support = "$env:LOCALAPPDATA\MeetingNotes"
-$OutDir  = "$env:USERPROFILE\Desktop\Meeting Notes"
+$OutDir  = "$([Environment]::GetFolderPath('Desktop'))\Meeting Notes"   # default; config.ps1 can override
 . "$Support\config.ps1"   # sets $Llm, $BaseUrl, $ApiKey, $SysDevice, $MicDevice
 if (-not $ApiKey) { $ApiKey = "not-needed" }
 switch ($Provider) {
