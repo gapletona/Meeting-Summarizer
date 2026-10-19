@@ -509,11 +509,83 @@ Invoke-Item $OutDir
 '@
 Set-Content -Path "$Bin\meeting.ps1" -Value $meeting -Encoding UTF8
 
-# 8) Create a `meeting` shim on PATH
+# 7b) Commands for files you already have: a transcript, or an audio/video recording
+$summarize = @'
+# summarize.ps1 (Windows) - summarizes an existing transcript file (.vtt / .docx / .txt / .md), no recording.
+param([Parameter(Mandatory=$true)][string]$Transcript, [string]$Model, [string]$Provider, [string]$Url, [string]$Key,
+      [int]$Context)
+$PSNativeCommandUseErrorActionPreference = $false
+$Support = "$env:LOCALAPPDATA\MeetingNotes"
+$OutDir  = "$([Environment]::GetFolderPath('Desktop'))\Meeting Notes"   # default; config.ps1 can override
+. "$Support\config.ps1"   # sets $Llm, $BaseUrl, $ApiKey, and optionally $Ctx / $OutDir
+if (-not $ApiKey) { $ApiKey = "not-needed" }
+switch ($Provider) {
+  "ollama"   { $BaseUrl = "http://localhost:11434/v1" }
+  "lmstudio" { $BaseUrl = "http://localhost:1234/v1" }
+  "omlx"     { $BaseUrl = "http://localhost:8005/v1" }
+  "llamacpp" { $BaseUrl = "http://localhost:8080/v1" }
+  "openai"   { $BaseUrl = "https://api.openai.com/v1" }
+}
+if ($Url)   { $BaseUrl = $Url }
+if ($Key)   { $ApiKey = $Key }
+if ($Model) { $Llm = $Model }
+if ($Context) { $Ctx = $Context } elseif (-not $Ctx) { $Ctx = 16384 }
+if (-not (Test-Path -LiteralPath $Transcript)) { Write-Host "Transcript file not found: $Transcript"; exit 1 }
+$Transcript = (Resolve-Path -LiteralPath $Transcript).Path
+Write-Host "Model: $Llm  @  $BaseUrl"
+New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
+Write-Host "Summarizing locally..."
+$NoteFile = & "$Support\venv\Scripts\python.exe" "$Support\notes_engine.py" `
+              --transcript "$Transcript" --out-dir "$OutDir" --llm $Llm --base-url $BaseUrl --api-key $ApiKey --ctx $Ctx
+if (-not $NoteFile) { Write-Host "Could not generate notes - is Ollama running? Try: ollama serve"; exit 1 }
+Write-Host "Saved to: $NoteFile"
+Invoke-Item $OutDir
+'@
+Set-Content -Path "$Bin\summarize.ps1" -Value $summarize -Encoding UTF8
+
+$meetingFile = @'
+# meeting-file.ps1 (Windows) - transcribes + summarizes an existing audio/video file locally (no recording).
+param([Parameter(Mandatory=$true)][string]$Audio, [string]$Model, [string]$Provider, [string]$Url, [string]$Key,
+      [int]$Context)
+$PSNativeCommandUseErrorActionPreference = $false
+$Support = "$env:LOCALAPPDATA\MeetingNotes"
+$OutDir  = "$([Environment]::GetFolderPath('Desktop'))\Meeting Notes"   # default; config.ps1 can override
+. "$Support\config.ps1"   # sets $Llm, $BaseUrl, $ApiKey, and optionally $Ctx / $OutDir
+if (-not $ApiKey) { $ApiKey = "not-needed" }
+switch ($Provider) {
+  "ollama"   { $BaseUrl = "http://localhost:11434/v1" }
+  "lmstudio" { $BaseUrl = "http://localhost:1234/v1" }
+  "omlx"     { $BaseUrl = "http://localhost:8005/v1" }
+  "llamacpp" { $BaseUrl = "http://localhost:8080/v1" }
+  "openai"   { $BaseUrl = "https://api.openai.com/v1" }
+}
+if ($Url)   { $BaseUrl = $Url }
+if ($Key)   { $ApiKey = $Key }
+if ($Model) { $Llm = $Model }
+if ($Context) { $Ctx = $Context } elseif (-not $Ctx) { $Ctx = 16384 }
+
+if (-not (Test-Path -LiteralPath $Audio)) { Write-Host "Audio file not found: $Audio"; exit 1 }
+$Audio = (Resolve-Path -LiteralPath $Audio).Path
+
+Write-Host "Model: $Llm  @  $BaseUrl"
+New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
+
+Write-Host "Transcribing and summarizing locally..."
+$NoteFile = & "$Support\venv\Scripts\python.exe" "$Support\notes_engine.py" "$Audio" `
+              --out-dir "$OutDir" --backend faster --llm $Llm --base-url $BaseUrl --api-key $ApiKey --ctx $Ctx
+if (-not $NoteFile) { Write-Host "Could not generate notes - is Ollama running? Try: ollama serve"; exit 1 }
+Write-Host "Saved to: $NoteFile"
+Invoke-Item $OutDir
+'@
+Set-Content -Path "$Bin\meeting-file.ps1" -Value $meetingFile -Encoding UTF8
+
+# 8) Create `meeting`, `summarize` and `meeting-file` shims on PATH
+foreach ($cmd in "meeting", "summarize", "meeting-file") {
 @"
 @echo off
-powershell -ExecutionPolicy Bypass -File `"$Bin\meeting.ps1`" %*
-"@ | Set-Content -Path "$Bin\meeting.cmd" -Encoding ASCII
+powershell -ExecutionPolicy Bypass -File `"$Bin\$cmd.ps1`" %*
+"@ | Set-Content -Path "$Bin\$cmd.cmd" -Encoding ASCII
+}
 $userPath = [Environment]::GetEnvironmentVariable("Path","User")
 if ($userPath -notlike "*$Bin*") {
   [Environment]::SetEnvironmentVariable("Path", "$userPath;$Bin", "User")
@@ -530,5 +602,7 @@ Write-Host "     default OUTPUT during calls, and enable 'Listen to this"
 Write-Host "     device' on 'CABLE Output' so you still hear the call."
 Write-Host ""
 Write-Host "  Then open a NEW terminal and run:   meeting   (press q to stop)"
-Write-Host "  Notes land in:  Desktop\Meeting Notes"
+Write-Host "  Already have a file?   summarize <transcript.vtt|.docx|.txt>"
+Write-Host "                         meeting-file <recording.m4a|.mp3|.mp4>"
+Write-Host "  Notes land in:  Desktop\Meeting Notes  (change with $OutDir in config.ps1)"
 Write-Host "============================================================"

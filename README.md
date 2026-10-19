@@ -126,12 +126,22 @@ meeting --help
 Already have a transcript? Skip recording and Whisper entirely:
 
 ```powershell
-meeting -Transcript "$env:USERPROFILE\Downloads\Weekly Sync.vtt"
+summarize "$env:USERPROFILE\Downloads\Weekly Sync.vtt"
 ```
+
+(`meeting -Transcript <file>` does the same thing.)
 
 - **Formats:** `.vtt` (Teams: *Recap ▸ Transcript ▸ Download ▸ .vtt*; Zoom works too), `.docx` (Teams' Word download), or plain `.txt` / `.md`.
 - **Speaker names are kept.** Timestamps and cue IDs are stripped and each person's lines are merged into `Name: text`, so action items get real owners.
 - **Long meetings are handled.** Notes are generated with a 16k-token context window (about 50 minutes of conversation in one pass); anything longer is summarized in parts and merged. Change it with `-Context 8192` (smaller GPU) or `$Ctx` in `config.ps1`.
+
+### Transcribe a recording you already have — Windows
+
+```powershell
+meeting-file "$env:USERPROFILE\Videos\Teams Recording.mp4"
+```
+
+Any audio or video ffmpeg can read (`.m4a`, `.mp3`, `.wav`, `.mp4` ...). `summarize` and `meeting-file` take the same `-Model`, `-Provider`, `-Url`, `-Key` and `-Context` options as `meeting`, and save to the same folder (`$OutDir` in `config.ps1`).
 
 ---
 
