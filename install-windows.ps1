@@ -334,15 +334,16 @@ def split_text(text, max_chars):
     return pieces
 
 
-def summarize(transcript, llm, base_url, api_key, ctx=16384):
+def summarize(transcript, llm, base_url, api_key, ctx=16384, name=None):
     t0 = time.perf_counter()
+    about = f"Meeting: {name}\n\n" if name else ""   # tells the model what the meeting is about
     chat = make_chat(llm, base_url, api_key, ctx)
     # Room for the transcript = context minus prompt overhead and ~2k tokens of reply.
     # ~3.5 characters per token is a safe estimate for English.
     max_chars = max(4000, int((ctx - 3000) * 3.5))
     if len(transcript) <= max_chars:
         log("Summarizing with the local model...")
-        notes = chat(SYSTEM_PROMPT, f"Here is the meeting transcript:\n\n{transcript}")
+        notes = chat(SYSTEM_PROMPT, f"{about}Here is the meeting transcript:\n\n{transcript}")
         return notes, time.perf_counter() - t0
 
     # Too long for one pass: notes per part, then (if needed, repeatedly) condense, then final notes.
@@ -351,7 +352,7 @@ def summarize(transcript, llm, base_url, api_key, ctx=16384):
     partials = []
     for i, part in enumerate(parts, 1):
         log(f"  part {i}/{len(parts)}...")
-        partials.append(chat(PART_PROMPT, f"Transcript part {i} of {len(parts)}:\n\n{part}"))
+        partials.append(chat(PART_PROMPT, f"{about}Transcript part {i} of {len(parts)}:\n\n{part}"))
     combined = "\n\n".join(f"## Part {i}\n{n}" for i, n in enumerate(partials, 1))
     for _ in range(3):                                 # bounded, in case notes don't shrink
         if len(combined) <= max_chars:
@@ -361,7 +362,7 @@ def summarize(transcript, llm, base_url, api_key, ctx=16384):
         combined = "\n\n".join(chat(PART_PROMPT, f"Notes from consecutive parts of one meeting:\n\n{g}")
                                for g in groups)
     log("  writing the final notes...")
-    notes = chat(SYSTEM_PROMPT, "These are notes taken from consecutive parts of ONE meeting, in order. "
+    notes = chat(SYSTEM_PROMPT, f"{about}These are notes taken from consecutive parts of ONE meeting, in order. "
                                 "Merge them into the final notes, removing duplicates. Where a later part "
                                 "changes an earlier decision, keep only the later one. Use exactly the "
                                 "sections and the '- [ ]' checklist format specified."
@@ -382,6 +383,8 @@ def main():
     p.add_argument("--llm", default="qwen3:4b")
     p.add_argument("--base-url", default="http://localhost:11434/v1")
     p.add_argument("--api-key", default="not-needed")
+    p.add_argument("--name", default=None,
+                   help="What the meeting is (e.g. 'Acme kickoff'); used in the title and file name")
     p.add_argument("--ctx", type=int, default=16384,
                    help="LLM context window in tokens; longer transcripts are summarized in parts")
     args = p.parse_args()
@@ -406,13 +409,16 @@ def main():
     else:
         log("Provide either an audio file or --transcript <file>"); sys.exit(1)
 
-    notes, t_sum = summarize(transcript, args.llm, args.base_url, args.api_key, args.ctx)
+    name = " ".join((args.name or "").split()) or None
+    notes, t_sum = summarize(transcript, args.llm, args.base_url, args.api_key, args.ctx, name)
 
     out_dir = Path(args.out_dir).expanduser(); out_dir.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y-%m-%d_%H-%M")
-    out_path = out_dir / f"Meeting Notes {stamp}.md"
-    header = (f"# Meeting Notes - {stamp}\n\n"
-              f"*Generated 100% locally ({backend}) - transcription {fmt(t_tx)} - summary {fmt(t_sum)}*\n\n")
+    # Keep the name in the file name, minus characters Windows does not allow there.
+    safe = " ".join(re.sub(r'[<>:"/\\|?*\x00-\x1f]', " ", name or "").split()).strip(" .")[:80].rstrip(" .")
+    out_path = out_dir / (f"Meeting Notes {stamp} - {safe}.md" if safe else f"Meeting Notes {stamp}.md")
+    header = (f"# {name} - {stamp}\n\n" if name else f"# Meeting Notes - {stamp}\n\n")
+    header += (f"*Generated 100% locally ({backend}) - transcription {fmt(t_tx)} - summary {fmt(t_sum)}*\n\n")
     out_path.write_text(header + notes + "\n\n---\n\n## Full Transcript\n\n" + transcript + "\n",
                         encoding="utf-8")
 
@@ -452,9 +458,10 @@ $MicDevice = Read-Host "Paste your MICROPHONE device name (from the list above)"
 # 7) Write the meeting command
 $meeting = @'
 # meeting.ps1 (Windows) - records system audio (via VB-CABLE) + mic, makes notes locally.
+#   meeting -Name "Acme kickoff"  labels the notes (title + file name) so you know what the meeting was.
 #   meeting -Transcript <file>  summarizes an existing transcript (.vtt / .docx / .txt) instead.
 param([string]$Model, [string]$Provider, [string]$Url, [string]$Key, [switch]$List,
-      [string]$Transcript, [int]$Context)
+      [string]$Transcript, [int]$Context, [string]$Name)
 $Support = "$env:LOCALAPPDATA\MeetingNotes"
 $OutDir  = "$([Environment]::GetFolderPath('Desktop'))\Meeting Notes"   # default; config.ps1 can override
 . "$Support\config.ps1"   # sets $Llm, $BaseUrl, $ApiKey, $SysDevice, $MicDevice
@@ -470,11 +477,14 @@ if ($Url)   { $BaseUrl = $Url }
 if ($Key)   { $ApiKey = $Key }
 if ($Model) { $Llm = $Model }
 if ($Context) { $Ctx = $Context } elseif (-not $Ctx) { $Ctx = 16384 }   # $Ctx may come from config.ps1
+# PowerShell 5.1 drops empty arguments to programs, so only pass --name when given.
+$NameArgs = if ($Name) { @("--name", ($Name -replace '"', "'")) } else { @() }
 if ($List) {
   & "$Support\venv\Scripts\python.exe" -c "from openai import OpenAI; [print(' -', m.id) for m in OpenAI(base_url='$BaseUrl', api_key='$ApiKey').models.list().data]"
   exit
 }
 Write-Host "Model: $Llm  @  $BaseUrl"
+if ($Name) { Write-Host "Meeting: $Name" }
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
 if ($Transcript) {
@@ -482,7 +492,7 @@ if ($Transcript) {
   $Transcript = (Resolve-Path -LiteralPath $Transcript).Path
   Write-Host "Summarizing transcript locally..."
   $NoteFile = & "$Support\venv\Scripts\python.exe" "$Support\notes_engine.py" --transcript "$Transcript" `
-                --out-dir "$OutDir" --llm $Llm --base-url $BaseUrl --api-key $ApiKey --ctx $Ctx
+                --out-dir "$OutDir" --llm $Llm --base-url $BaseUrl --api-key $ApiKey --ctx $Ctx @NameArgs
   if (-not $NoteFile) { Write-Host "Could not generate notes - is Ollama running? Try: ollama serve"; exit 1 }
   Write-Host "Saved to: $NoteFile"
   Invoke-Item $OutDir
@@ -501,7 +511,7 @@ ffmpeg -hide_banner -loglevel error `
 
 Write-Host "Transcribing and summarizing locally..."
 $NoteFile = & "$Support\venv\Scripts\python.exe" "$Support\notes_engine.py" "$Audio" `
-              --out-dir "$OutDir" --backend faster --llm $Llm --base-url $BaseUrl --api-key $ApiKey --ctx $Ctx
+              --out-dir "$OutDir" --backend faster --llm $Llm --base-url $BaseUrl --api-key $ApiKey --ctx $Ctx @NameArgs
 if (-not $NoteFile) { Write-Host "Could not generate notes - is Ollama running? Try: ollama serve"; exit 1 }
 Remove-Item $Audio -ErrorAction SilentlyContinue
 Write-Host "Saved to: $OutDir"
@@ -513,7 +523,7 @@ Set-Content -Path "$Bin\meeting.ps1" -Value $meeting -Encoding UTF8
 $summarize = @'
 # summarize.ps1 (Windows) - summarizes an existing transcript file (.vtt / .docx / .txt / .md), no recording.
 param([Parameter(Mandatory=$true)][string]$Transcript, [string]$Model, [string]$Provider, [string]$Url, [string]$Key,
-      [int]$Context)
+      [int]$Context, [string]$Name)
 $PSNativeCommandUseErrorActionPreference = $false
 $Support = "$env:LOCALAPPDATA\MeetingNotes"
 $OutDir  = "$([Environment]::GetFolderPath('Desktop'))\Meeting Notes"   # default; config.ps1 can override
@@ -530,13 +540,16 @@ if ($Url)   { $BaseUrl = $Url }
 if ($Key)   { $ApiKey = $Key }
 if ($Model) { $Llm = $Model }
 if ($Context) { $Ctx = $Context } elseif (-not $Ctx) { $Ctx = 16384 }
+# PowerShell 5.1 drops empty arguments to programs, so only pass --name when given.
+$NameArgs = if ($Name) { @("--name", ($Name -replace '"', "'")) } else { @() }
 if (-not (Test-Path -LiteralPath $Transcript)) { Write-Host "Transcript file not found: $Transcript"; exit 1 }
 $Transcript = (Resolve-Path -LiteralPath $Transcript).Path
 Write-Host "Model: $Llm  @  $BaseUrl"
+if ($Name) { Write-Host "Meeting: $Name" }
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 Write-Host "Summarizing locally..."
 $NoteFile = & "$Support\venv\Scripts\python.exe" "$Support\notes_engine.py" `
-              --transcript "$Transcript" --out-dir "$OutDir" --llm $Llm --base-url $BaseUrl --api-key $ApiKey --ctx $Ctx
+              --transcript "$Transcript" --out-dir "$OutDir" --llm $Llm --base-url $BaseUrl --api-key $ApiKey --ctx $Ctx @NameArgs
 if (-not $NoteFile) { Write-Host "Could not generate notes - is Ollama running? Try: ollama serve"; exit 1 }
 Write-Host "Saved to: $NoteFile"
 Invoke-Item $OutDir
@@ -546,7 +559,7 @@ Set-Content -Path "$Bin\summarize.ps1" -Value $summarize -Encoding UTF8
 $meetingFile = @'
 # meeting-file.ps1 (Windows) - transcribes + summarizes an existing audio/video file locally (no recording).
 param([Parameter(Mandatory=$true)][string]$Audio, [string]$Model, [string]$Provider, [string]$Url, [string]$Key,
-      [int]$Context)
+      [int]$Context, [string]$Name)
 $PSNativeCommandUseErrorActionPreference = $false
 $Support = "$env:LOCALAPPDATA\MeetingNotes"
 $OutDir  = "$([Environment]::GetFolderPath('Desktop'))\Meeting Notes"   # default; config.ps1 can override
@@ -563,16 +576,19 @@ if ($Url)   { $BaseUrl = $Url }
 if ($Key)   { $ApiKey = $Key }
 if ($Model) { $Llm = $Model }
 if ($Context) { $Ctx = $Context } elseif (-not $Ctx) { $Ctx = 16384 }
+# PowerShell 5.1 drops empty arguments to programs, so only pass --name when given.
+$NameArgs = if ($Name) { @("--name", ($Name -replace '"', "'")) } else { @() }
 
 if (-not (Test-Path -LiteralPath $Audio)) { Write-Host "Audio file not found: $Audio"; exit 1 }
 $Audio = (Resolve-Path -LiteralPath $Audio).Path
 
 Write-Host "Model: $Llm  @  $BaseUrl"
+if ($Name) { Write-Host "Meeting: $Name" }
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
 Write-Host "Transcribing and summarizing locally..."
 $NoteFile = & "$Support\venv\Scripts\python.exe" "$Support\notes_engine.py" "$Audio" `
-              --out-dir "$OutDir" --backend faster --llm $Llm --base-url $BaseUrl --api-key $ApiKey --ctx $Ctx
+              --out-dir "$OutDir" --backend faster --llm $Llm --base-url $BaseUrl --api-key $ApiKey --ctx $Ctx @NameArgs
 if (-not $NoteFile) { Write-Host "Could not generate notes - is Ollama running? Try: ollama serve"; exit 1 }
 Write-Host "Saved to: $NoteFile"
 Invoke-Item $OutDir

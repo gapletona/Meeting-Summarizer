@@ -96,6 +96,14 @@ A minute later, your notes are ready in `Desktop/Meeting Notes` and in your inbo
 
 ## Customize Your Setup
 
+### Name the meeting (Windows):
+
+```powershell
+meeting -Name "Acme kickoff"
+```
+
+The name becomes the note's title and is added to the file name (`Meeting Notes 2026-10-22_14-05 - Acme kickoff.md`), so you can tell meetings apart at a glance. It is also given to the AI as context. `summarize` and `meeting-file` accept `-Name` too.
+
 ### Use a different AI model for a single call:
 
 ```bash
