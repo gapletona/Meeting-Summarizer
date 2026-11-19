@@ -413,10 +413,12 @@ def main():
     notes, t_sum = summarize(transcript, args.llm, args.base_url, args.api_key, args.ctx, name)
 
     out_dir = Path(args.out_dir).expanduser(); out_dir.mkdir(parents=True, exist_ok=True)
-    stamp = time.strftime("%Y-%m-%d_%H-%M")
+    now = time.localtime()
+    stamp = time.strftime("%Y-%m-%d_%H-%M", now)
     # Keep the name in the file name, minus characters Windows does not allow there.
     safe = " ".join(re.sub(r'[<>:"/\\|?*\x00-\x1f]', " ", name or "").split()).strip(" .")[:80].rstrip(" .")
-    out_path = out_dir / (f"Meeting Notes {stamp} - {safe}.md" if safe else f"Meeting Notes {stamp}.md")
+    # File name: "2026-11-19_1405 Acme kickoff.md" (Windows forbids ":" in file names, so HHMM).
+    out_path = out_dir / f"{time.strftime('%Y-%m-%d_%H%M', now)} {safe or 'Meeting Notes'}.md"
     header = (f"# {name} - {stamp}\n\n" if name else f"# Meeting Notes - {stamp}\n\n")
     header += (f"*Generated 100% locally ({backend}) - transcription {fmt(t_tx)} - summary {fmt(t_sum)}*\n\n")
     out_path.write_text(header + notes + "\n\n---\n\n## Full Transcript\n\n" + transcript + "\n",

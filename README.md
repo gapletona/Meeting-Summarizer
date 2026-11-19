@@ -102,7 +102,7 @@ A minute later, your notes are ready in `Desktop/Meeting Notes` and in your inbo
 meeting -Name "Acme kickoff"
 ```
 
-The name becomes the note's title and is added to the file name (`Meeting Notes 2026-10-22_14-05 - Acme kickoff.md`), so you can tell meetings apart at a glance. It is also given to the AI as context. `summarize` and `meeting-file` accept `-Name` too.
+The name becomes the note's title and is added to the file name (`2026-10-22_1405 Acme kickoff.md`; without a name: `2026-10-22_1405 Meeting Notes.md`), so you can tell meetings apart at a glance. It is also given to the AI as context. `summarize` and `meeting-file` accept `-Name` too.
 
 ### Use a different AI model for a single call:
 
